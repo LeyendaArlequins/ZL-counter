@@ -3,7 +3,7 @@ import { Client, GatewayIntentBits, EmbedBuilder } from 'discord.js';
 import fs from 'fs';  
   
 // === CONFIGURACIÓN ===  
-const TOKEN = "TU_TOKEN_AQUI"; // 🔹 Escribe tu token aquí directamente
+client.login(process.env.TOKEN); // 🔹 Escribe tu token aquí directamente
 const TARGET_CHANNEL_ID = '1436197277428482109'; // Canal donde contar mensajes  
 const EMBED_CHANNEL_ID = '1437108848254124052'; // Canal donde enviar el embed  
 const RESET_TIME = 24 * 60 * 60 * 1000; // 24 horas  
