@@ -1,178 +1,163 @@
 // === IMPORTS ===
 import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
-import fs from "fs";
 
 // === CONFIGURACIÓN ===
 const TOKEN = process.env.TOKEN; // Token desde Railway (secreto)
-const TARGET_CHANNEL_ID = "1436197277428482109"; // Canal donde contar mensajes
-const EMBED_CHANNEL_ID = "1437108848254124052"; // Canal donde enviar el embed
-const RESET_TIME = 24 * 60 * 60 * 1000; // 24 horas
+const API_URL = process.env.API_URL; // API desde secreto
+const NOTIFICATION_CHANNEL_ID = "1443332719869431828"; // Canal donde enviar las notificaciones
+const CHECK_INTERVAL = 30000; // Revisar cada 30 segundos
 
 // === VARIABLES ===
-let messageCount = 0;
-let embedMessageId = null;
+let lastProcessedServers = new Set();
+let isChecking = false;
 
 // === CLIENTE DISCORD ===
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
   ],
 });
 
 // === EVENTO READY ===
 client.once("ready", async () => {
   console.log(`✅ Bot conectado como ${client.user.tag}`);
-  await initializeEmbed();
-  scheduleDailyReset();
-  console.log("🟢 Contador activo y escuchando TODOS los mensajes");
+  startAPIChecker();
+  console.log("🟢 Monitor de API activo");
 });
 
-// === CAPTURAR TODOS LOS MENSAJES (INCLUYE BOTS Y WEBHOOKS) ===
-client.on("raw", async (packet) => {
-  if (packet.t !== "MESSAGE_CREATE") return;
+// === MONITOR DE API ===
+async function startAPIChecker() {
+  setInterval(async () => {
+    if (isChecking) return;
+    await checkAPI();
+  }, CHECK_INTERVAL);
+}
 
-  const data = packet.d;
-  if (data.channel_id !== TARGET_CHANNEL_ID) return;
-
-  messageCount++;
-
-  const authorTag = data.author?.username
-    ? `${data.author.username}#${data.author.discriminator}`
-    : "Webhook/Embed";
-
-  console.log(`📨 Mensaje contado (${messageCount}) - Autor: ${authorTag}`);
-  await updateEmbed();
-});
-
-// === FUNCIONES PRINCIPALES ===
-async function initializeEmbed() {
+async function checkAPI() {
   try {
-    const embedChannel = client.channels.cache.get(EMBED_CHANNEL_ID);
-    if (!embedChannel) {
-      console.error("❌ Canal de embed no encontrado");
+    isChecking = true;
+    
+    const response = await fetch(API_URL);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    
+    const data = await response.json();
+    
+    if (!data.success || !data.activeServers) {
+      console.log("❌ API no disponible o sin servidores activos");
       return;
     }
 
-    const messages = await embedChannel.messages.fetch({ limit: 20 });
-    const botEmbed = messages.find(
-      (msg) =>
-        msg.author.id === client.user.id &&
-        msg.embeds.length > 0 &&
-        msg.embeds[0].title === "Ejecuciones hoy"
-    );
+    await processNewServers(data.activeServers);
+    
+  } catch (error) {
+    console.error("⚠️ Error al consultar API:", error.message);
+  } finally {
+    isChecking = false;
+  }
+}
 
-    if (botEmbed) {
-      embedMessageId = botEmbed.id;
-      console.log("📌 Embed existente encontrado:", embedMessageId);
-      await updateEmbed();
-    } else {
-      await sendNewEmbed();
-      console.log("🆕 Nuevo embed creado");
+async function processNewServers(servers) {
+  for (const server of servers) {
+    const serverId = server.gameInstanceId;
+    
+    // Evitar procesar el mismo servidor múltiples veces
+    if (lastProcessedServers.has(serverId)) {
+      continue;
     }
-  } catch (error) {
-    console.error("⚠️ Error al inicializar embed:", error);
+    
+    console.log(`🆕 Nuevo servidor detectado: ${serverId}`);
+    lastProcessedServers.add(serverId);
+    await sendNotification(server);
+    
+    // Limitar el cache para evitar memory leaks
+    if (lastProcessedServers.size > 50) {
+      const first = Array.from(lastProcessedServers)[0];
+      lastProcessedServers.delete(first);
+    }
   }
 }
 
-async function sendNewEmbed() {
-  const embed = new EmbedBuilder()
-    .setTitle("Ejecuciones hoy")
-    .setColor(0x00ff00)
-    .setDescription(
-      `**Número de ejecuciones:**\n\`\`\`py\n${messageCount}\n\`\`\``
-    )
-    .setTimestamp()
-    .setFooter({ text: "Contador se reinicia cada 24 horas" });
-
+async function sendNotification(server) {
   try {
-    const embedChannel = client.channels.cache.get(EMBED_CHANNEL_ID);
-    if (!embedChannel) return;
-
-    const sentMessage = await embedChannel.send({ embeds: [embed] });
-    embedMessageId = sentMessage.id;
-    console.log("📨 Embed enviado con ID:", embedMessageId);
-  } catch (error) {
-    console.error("⚠️ Error al enviar nuevo embed:", error);
-  }
-}
-
-async function updateEmbed() {
-  if (!embedMessageId) {
-    console.log("⚠️ No hay embed, creando uno nuevo...");
-    await sendNewEmbed();
-    return;
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle("Ejecuciones hoy")
-    .setColor(0x00ff00)
-    .setDescription(
-      `**Número de ejecuciones:**\n\`\`\`py\n${messageCount}\n\`\`\``
-    )
-    .setTimestamp()
-    .setFooter({ text: "Contador se reinicia cada 24 horas" });
-
-  try {
-    const embedChannel = client.channels.cache.get(EMBED_CHANNEL_ID);
-    if (!embedChannel) {
-      console.error("❌ Canal de embed no encontrado");
+    const channel = client.channels.cache.get(NOTIFICATION_CHANNEL_ID);
+    if (!channel) {
+      console.error("❌ Canal de notificación no encontrado");
       return;
     }
 
-    const messageToEdit = await embedChannel.messages.fetch(embedMessageId);
-    await messageToEdit.edit({ embeds: [embed] });
-    console.log(`🔢 Embed actualizado: ${messageCount} mensajes`);
-  } catch (error) {
-    if (error.code === 10008) {
-      console.log("🗑️ El embed fue eliminado, creando uno nuevo...");
-      embedMessageId = null;
-      await sendNewEmbed();
+    const { animalData, gameInstanceId, placeId } = server;
+    
+    // Formatear el dinero por segundo
+    const value = animalData.value || 0;
+    let moneyPerSecFormatted;
+    
+    if (value >= 1000000000) {
+      moneyPerSecFormatted = `💰 ${(value / 1000000000).toFixed(1)}B/s`;
+    } else if (value >= 1000000) {
+      moneyPerSecFormatted = `💰 ${(value / 1000000).toFixed(1)}M/s`;
+    } else if (value >= 1000) {
+      moneyPerSecFormatted = `💰 ${(value / 1000).toFixed(1)}K/s`;
     } else {
-      console.error("⚠️ Error al actualizar embed:", error);
+      moneyPerSecFormatted = `💰 ${value}/s`;
     }
+
+    const embed = new EmbedBuilder()
+      .setTitle("🐾 **Zl | Finder**")
+      .setColor(0x00FF00)
+      .addFields(
+        {
+          name: "**Name**",
+          value: animalData.displayName || "N/A",
+          inline: false
+        },
+        {
+          name: "**Money per sec**",
+          value: moneyPerSecFormatted,
+          inline: true
+        },
+        {
+          name: "**Generation**",
+          value: `📊 ${animalData.generation || "N/A"}`,
+          inline: true
+        },
+        {
+          name: "**Rarity**",
+          value: `🌟 ${animalData.rarity || "N/A"}`,
+          inline: true
+        },
+        {
+          name: "**Job ID**",
+          value: `\`\`\`${gameInstanceId}\`\`\``,
+          inline: false
+        },
+        {
+          name: "**Join Link**",
+          value: `[Click to Join](https://chillihub1.github.io/chillihub-joiner/?placeId=${placeId}&gameInstanceId=${gameInstanceId})`,
+          inline: false
+        },
+        {
+          name: "**Join Script (PC)**",
+          value: `\`\`\`lua\ngame:GetService("TeleportService"):TeleportToPlaceInstance(${placeId},"${gameInstanceId}",game.Players.LocalPlayer)\n\`\`\``,
+          inline: false
+        }
+      )
+      .setTimestamp()
+      .setFooter({ 
+        text: `made by zl hub • ${new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })}`,
+      });
+
+    await channel.send({
+      embeds: [embed],
+      username: "Zl Notifier",
+      avatarURL: "https://cdn.discordapp.com/attachments/1128833213672656988/1215321493282160730/standard_1.gif"
+    });
+
+    console.log(`📨 Notificación enviada para: ${animalData.displayName}`);
+
+  } catch (error) {
+    console.error("⚠️ Error al enviar notificación:", error);
   }
-}
-
-// === PROGRAMAR RESET DIARIO ===
-function scheduleDailyReset() {
-  const now = new Date();
-  const midnight = new Date();
-  midnight.setHours(24, 0, 0, 0);
-  const timeUntilMidnight = midnight - now;
-
-  setTimeout(() => {
-    resetCounter();
-    setInterval(resetCounter, RESET_TIME);
-  }, timeUntilMidnight);
-
-  console.log(
-    `🕒 Reset programado en ${(timeUntilMidnight / 1000 / 60).toFixed(1)} minutos`
-  );
-}
-
-// === REINICIAR CONTADOR Y GUARDAR LOG ===
-function resetCounter() {
-  const today = new Date();
-  const dateStr = today.toLocaleDateString("es-MX", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  saveDailyLog(dateStr, messageCount);
-  messageCount = 0;
-  console.log("🔄 Contador reiniciado");
-  updateEmbed();
-}
-
-// === GUARDAR REGISTRO EN ARCHIVO ===
-function saveDailyLog(dateStr, count) {
-  const logFile = "registro.txt";
-  const logLine = `Día ${dateStr} = ${count}\n`;
-
-  fs.appendFileSync(logFile, logLine);
-  console.log(`🗓️ Guardado en registro.txt → ${logLine.trim()}`);
 }
 
 // === ERRORES ===
